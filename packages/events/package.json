@@ -1,0 +1,20 @@
+{
+  "name": "@mailysend/events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bounce": "./src/bounce.ts",
+    "./bots": "./src/bots.ts"
+  },
+  "scripts": {
+    "build": "echo 'events: source-only'",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mailysend/contracts": "workspace:*",
+    "@mailysend/core": "workspace:*",
+    "@mailysend/platform": "workspace:*"
+  }
+}

@@ -1,0 +1,232 @@
+{
+  // The self-hosted deployment. This is the file the "Deploy to Cloudflare"
+  // button reads, so every binding it names must either auto-provision (KV, D1,
+  // R2, Secrets Store) or be created by scripts/provision.ts before the deploy.
+  // Queues, Workflows, Analytics Engine datasets and the sending domain do NOT
+  // auto-provision — that is why the button's real path is repo -> CI -> deploy.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mailysend",
+  // The *source* entry, not a build artifact. The Cloudflare Vite plugin reads
+  // this config at config-resolution time — before anything is built — so a
+  // path into the output directory fails on a clean checkout, and the plugin
+  // is what produces the bundle anyway.
+  "main": "src/server.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+
+  // No `directory`: the Vite plugin points this at the client build itself.
+  "assets": {
+    "binding": "ASSETS",
+    // The Worker runs first and falls through to assets, because /v1 and the
+    // tracking routes must never be shadowed by a same-named static file.
+    "run_worker_first": ["/v1/*", "/o/*", "/c/*", "/u/*", "/mcp/*"]
+  },
+
+  // Deliberately empty.
+  //
+  // No MS_PUBLIC_URL, because a placeholder would *pin* the instance to that
+  // hostname — every tracking pixel, unsubscribe link and canonical tag minted
+  // against a domain nobody owns. Unset, the app learns its own origin from the
+  // first non-local request and stores it; set it only to override.
+  //
+  // And no MS_MODE / MS_DEFAULT_PROVIDER / EVENT_DETAIL either, even though
+  // they are the three fields the Deploy to Cloudflare form asks about. The
+  // form stores its answers as secrets, a var of the same name overwrites a
+  // secret on every deploy, and so listing them here would silently revert the
+  // operator's answers on their next build. All three default in code:
+  // `single`, `cloudflare`, and detail on.
+  "vars": {},
+
+  // No `database_id` and no KV `id` anywhere below, deliberately. A generated
+  // id cannot be committed, and a literal placeholder is worse than nothing:
+  // wrangler validates bindings before it uploads, so `"id": "PLACEHOLDER"`
+  // failed the deploy outright with `KV namespace 'PLACEHOLDER' is not valid`.
+  // Omitted, the resource is created — by `scripts/ensure-resources.mjs` during
+  // the build, which then writes the real ids into the config wrangler
+  // deploys, and by wrangler's own provisioning if that could not run.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mailysend",
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ],
+
+  "kv_namespaces": [
+    { "binding": "CACHE" },
+    // Separate from CACHE deliberately: suppressions are permanent and
+    // authoritative-for-reads, and must never share an eviction story with a
+    // 300-second API-key cache.
+    { "binding": "SUPPRESSIONS" }
+  ],
+
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "mailysend" }],
+
+  "queues": {
+    "producers": [
+      { "binding": "SEND_QUEUE", "queue": "ms-send" },
+      { "binding": "SEND_BULK_QUEUE", "queue": "ms-send-bulk" },
+      { "binding": "EVENTS_QUEUE", "queue": "ms-events-norm" },
+      { "binding": "WEBHOOKS_QUEUE", "queue": "ms-webhooks" },
+      { "binding": "BROADCAST_QUEUE", "queue": "ms-broadcast-pages" },
+      { "binding": "INBOUND_QUEUE", "queue": "ms-inbound" },
+      { "binding": "SEGMENTS_QUEUE", "queue": "ms-segments" },
+      { "binding": "AUTOMATION_QUEUE", "queue": "ms-automation-triggers" },
+      { "binding": "DMARC_QUEUE", "queue": "ms-dmarc" },
+      { "binding": "EXPORT_QUEUE", "queue": "ms-export" }
+    ],
+    "consumers": [
+      // max_batch_size 100 on the event queue is what makes the "100 events
+      // become ~6 database writes" claim true; a smaller batch would not
+      // amortise the round trip.
+      {
+        "queue": "ms-send",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-send-bulk",
+        "max_batch_size": 25,
+        "max_batch_timeout": 10,
+        "max_retries": 5,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-events-cf",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-events-norm",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-webhooks",
+        "max_batch_size": 10,
+        "max_batch_timeout": 2,
+        "max_retries": 6,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-broadcast-pages",
+        "max_batch_size": 5,
+        "max_batch_timeout": 2,
+        "max_retries": 5,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-inbound",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-segments",
+        "max_batch_size": 20,
+        "max_batch_timeout": 10,
+        "max_retries": 4,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-automation-triggers",
+        "max_batch_size": 50,
+        "max_batch_timeout": 5,
+        "max_retries": 4,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-dmarc",
+        "max_batch_size": 1,
+        "max_batch_timeout": 30,
+        "max_retries": 3,
+        "dead_letter_queue": "ms-dlq"
+      },
+      {
+        "queue": "ms-export",
+        "max_batch_size": 1,
+        "max_batch_timeout": 30,
+        "max_retries": 3,
+        "dead_letter_queue": "ms-dlq"
+      }
+    ]
+  },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SENDING_DOMAIN", "class_name": "SendingDomainDO" },
+      { "name": "BROADCAST", "class_name": "BroadcastDO" },
+      { "name": "BROADCAST_COUNTER", "class_name": "BroadcastCounterDO" },
+      { "name": "WEBHOOK_ENDPOINT", "class_name": "WebhookEndpointDO" },
+      { "name": "SCHEDULE_SHARD", "class_name": "ScheduleShardDO" },
+      { "name": "MAILBOX", "class_name": "MailboxDO" },
+      { "name": "SEGMENT", "class_name": "SegmentDO" },
+      { "name": "AUTOMATION_COHORT", "class_name": "AutomationCohortDO" },
+      { "name": "AUTOMATION_RUN", "class_name": "AutomationRunDO" },
+      { "name": "WORKSPACE_HUB", "class_name": "WorkspaceHubDO" }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      // SQLite-backed, because MailboxDO needs FTS5 and BroadcastDO needs
+      // 10 GB rather than the 128 KB a key-value object gets.
+      "new_sqlite_classes": [
+        "SendingDomainDO",
+        "BroadcastDO",
+        "BroadcastCounterDO",
+        "WebhookEndpointDO",
+        "ScheduleShardDO",
+        "MailboxDO",
+        "SegmentDO",
+        "AutomationCohortDO",
+        "AutomationRunDO",
+        "WorkspaceHubDO"
+      ]
+    }
+  ],
+
+  "analytics_engine_datasets": [
+    { "binding": "EMAIL_EVENTS", "dataset": "ms_email_events" },
+    { "binding": "API_USAGE", "dataset": "ms_api_usage" }
+  ],
+
+  "send_email": [{ "name": "SEND_EMAIL" }],
+
+  // One schedule, deliberately. Cron triggers are counted per account and the
+  // Workers Free plan allows five, so three per instance meant the second
+  // deployment on an account lost triggers and the third could not deploy:
+  //
+  //   This account has reached the Workers Free limit of 5 cron triggers per
+  //   account [code: 10072]
+  //
+  // The hourly schedule did nothing, and `runCron` claims the daily task off
+  // the minute tick — once per UTC day, however many ticks arrive.
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
+
+  // No `limits.cpu_ms`, deliberately. 30000 is already the Workers Paid
+  // default, so setting it explicitly bought nothing — and it is rejected
+  // outright by an account on the Free plan, where the CPU limit is a fixed
+  // 10 ms that cannot be configured at all:
+  //
+  //   CPU limits are not supported for the Free plan [code: 100328]
+  //
+  // That failed the entire one-click deploy at the upload step, after every
+  // resource had been created, for a setting that changed nothing. Everything
+  // else here works on Free: the Durable Objects are all `new_sqlite_classes`,
+  // and Queues and Workflows both have free tiers. If a handler ever genuinely
+  // needs more than 30 s of CPU, raise it here — and know that you have just
+  // made the deploy paid-only.
+}
